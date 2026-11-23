@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Проверка HTTP Basic-авторизации на корне домена (только для своих / авторизованных целей).
+Checks HTTP Basic authentication on the root path of a domain (only for your own / authorized targets).
 
-Для каждого хоста из файла:
-  1. GET /  без авторизации
-       - нет WWW-Authenticate: Basic (любой код статуса) -> хост пропускается
-  2. GET /  с заголовком Authorization: Basic <base64(user:pass)>
-       для каждой пары из --creds (по умолчанию все пары из DEFAULT_CREDS)
-       - 200 OK -> MATCH, остальные пары не проверяются
+For each host from the file:
+  1. GET /  without authorization
+       - no WWW-Authenticate: Basic header (any status code) -> host is skipped
+  2. GET /  with the header Authorization: Basic <base64(user:pass)>
+       for each pair from --creds (default: all pairs from DEFAULT_CREDS)
+       - 200 OK -> MATCH, remaining pairs are not checked
 
-Использование:
+Usage:
     python3 basic_auth_check.py -f alive_cloud_assets.txt -o basic_auth_matches.txt
     python3 basic_auth_check.py -f hosts.txt --creds admin:admin --creds admin:password \
         --json basic_auth_results.json --user-agent "EASM by appsec@fozzy.ua" --delay 0.5
 
-Строки без схемы считаются https://. Пути в строках игнорируются: проверяется только корень.
+Lines without a scheme are treated as https://. Paths in the lines are ignored: only the root is checked.
 """
 import argparse
 import base64
@@ -34,7 +34,7 @@ import urllib3
 DEFAULT_CREDS = [
     "admin:admin",
     "admin:password",
-    "admin:",            # пустой пароль
+    "admin:",            # empty password
     "admin:123456",
     "demo:demo",
     "test:test",
@@ -43,7 +43,7 @@ DEFAULT_CREDS = [
     "user:user",
     "root:toor",
 
-    # общие и системные
+    # general / system
     "administrator:",
     "Administrator:password",
     "Administrator:admin",
@@ -75,11 +75,10 @@ DEFAULT_CREDS = [
     "root:changeme",
     "root:alpine",
 
-    # сетевое оборудование и роутеры
+    # network equipment and routers
     "cisco:cisco",
     "enable:cisco",
     "ubnt:ubnt",
-    "admin:1234",
     "admin:smcadmin",
     "admin:zelax",
     "Admin:admin",
@@ -89,11 +88,9 @@ DEFAULT_CREDS = [
     "root:888888",
     "root:xmhdipc",
     "root:default",
-    "support:support",
-    "user:user",
     "mikrotik:mikrotik",
 
-    # базы данных и инфраструктура
+    # databases and infrastructure
     "postgres:postgres",
     "sa:",
     "sa:sa",
@@ -113,7 +110,7 @@ DEFAULT_CREDS = [
     "influx:influx",
     "redis:",
 
-    # серверы приложений и CI/CD
+    # application servers and CI/CD
     "tomcat:tomcat",
     "admin:tomcat",
     "tomcat:s3cret",
@@ -124,10 +121,9 @@ DEFAULT_CREDS = [
     "jboss:jboss",
     "admin:jboss",
     "jenkins:jenkins",
-    "admin:admin",
     "gitlab:5iveL!fe",
 
-    # панели управления, CMS и мониторинг
+    # control panels, CMS and monitoring
     "admin:nimda",
     "admin:qwerty",
     "admin:letmein",
@@ -146,9 +142,9 @@ BASIC_CHALLENGE_RE = re.compile(r"(^|,)\s*basic(\s|$)", re.IGNORECASE)
 class Result:
     base_url: str
     unauth_status: Optional[int] = None
-    challenge: Optional[str] = None        # WWW-Authenticate с Basic-челленджем
+    challenge: Optional[str] = None        # WWW-Authenticate header with a Basic challenge
     matched: bool = False
-    creds: Optional[str] = None            # пара, которая дала 200
+    creds: Optional[str] = None            # the pair that returned 200
     status: Optional[int] = None
     body_size: Optional[int] = None
     content_type: Optional[str] = None
@@ -157,7 +153,7 @@ class Result:
 
 
 def root_of(line: str) -> Optional[str]:
-    """'host/path' -> 'https://host' (схема добавляется, если её нет)."""
+    """'host/path' -> 'https://host' (adds the scheme if it is missing)."""
     raw = line.strip()
     if "://" not in raw:
         raw = "https://" + raw
@@ -177,7 +173,7 @@ def read_bases(path: str) -> list[str]:
             base = root_of(s)
             if base:
                 bases.append(base)
-    return list(dict.fromkeys(bases))  # дедуп с сохранением порядка
+    return list(dict.fromkeys(bases))  # deduplicate, preserving order
 
 
 def check_host(base: str, creds: list[str], timeout: int, verify: bool,
@@ -185,7 +181,7 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
     res = Result(base_url=base)
     root = base + "/"
 
-    # 1. без авторизации
+    # 1. request without authorization
     try:
         r = requests.get(root, headers=headers, timeout=timeout, verify=verify,
                          allow_redirects=False)
@@ -199,7 +195,7 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
         return res
     res.challenge = challenge
 
-    # 2. пробуем креды по очереди, первый 200 — матч
+    # 2. try the credentials one by one; the first 200 is a match
     for pair in creds:
         token = base64.b64encode(pair.encode("utf-8")).decode("ascii")
         h = dict(headers)
@@ -223,36 +219,36 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Проверка Basic-авторизации (admin:admin) на корнях доменов")
-    ap.add_argument("-f", "--file", required=True, help="Файл с хостами/URL (один на строку)")
+    ap = argparse.ArgumentParser(description="Checks Basic authentication (admin:admin) on domain roots")
+    ap.add_argument("-f", "--file", required=True, help="File with hosts/URLs (one per line)")
     ap.add_argument("-o", "--output", default="basic_auth_matches.txt",
-                    help="Файл с матчами (URL, пара, статус)")
-    ap.add_argument("--json", metavar="FILE", help="Полный результат по всем хостам с Basic-challenge (JSON)")
+                    help="File for matches (URL, pair, status)")
+    ap.add_argument("--json", metavar="FILE", help="Full results for all hosts with a Basic challenge (JSON)")
     ap.add_argument("--creds", action="append", metavar="USER:PASS",
-                    help="Пара для проверки (можно несколько раз). По умолчанию все пары из DEFAULT_CREDS")
-    ap.add_argument("-w", "--workers", type=int, default=20, help="Параллельных хостов (default 20)")
-    ap.add_argument("-t", "--timeout", type=int, default=10, help="Таймаут запроса, сек (default 10)")
+                    help="Pair to check (can be given several times). Default: all pairs from DEFAULT_CREDS")
+    ap.add_argument("-w", "--workers", type=int, default=20, help="Parallel hosts (default 20)")
+    ap.add_argument("-t", "--timeout", type=int, default=10, help="Request timeout, sec (default 10)")
     ap.add_argument("--delay", type=float, default=0.0,
-                    help="Пауза перед каждой попыткой с кредами, сек (default 0)")
-    ap.add_argument("--user-agent", default=None, help="User-Agent для запросов")
-    ap.add_argument("--no-verify-ssl", action="store_true", help="Не проверять TLS-сертификаты")
+                    help="Pause before each credential attempt, sec (default 0)")
+    ap.add_argument("--user-agent", default=None, help="User-Agent for requests")
+    ap.add_argument("--no-verify-ssl", action="store_true", help="Do not verify TLS certificates")
     args = ap.parse_args()
 
     creds = args.creds or DEFAULT_CREDS
     for c in creds:
         if ":" not in c:
-            sys.exit(f"--creds должен быть в формате USER:PASS, получено: {c!r}")
+            sys.exit(f"--creds must be in USER:PASS format, got: {c!r}")
 
     bases = read_bases(args.file)
     if not bases:
-        sys.exit("список хостов пуст")
+        sys.exit("host list is empty")
 
     verify = not args.no_verify_ssl
     if not verify:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     headers = {"User-Agent": args.user_agent} if args.user_agent else {}
 
-    print(f"[*] хостов: {len(bases)}, пар: {len(creds)} ({', '.join(creds)})")
+    print(f"[*] hosts: {len(bases)}, pairs: {len(creds)} ({', '.join(creds)})")
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
         results = list(ex.map(
             lambda b: check_host(b, creds, args.timeout, verify, headers, args.delay),
@@ -270,8 +266,8 @@ def main():
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump([asdict(r) for r in basic_hosts], f, ensure_ascii=False, indent=2)
 
-    print(f"[*] с Basic-challenge на /: {len(basic_hosts)}")
-    print(f"[*] MATCH (200 с кредами): {len(matches)} -> {args.output}")
+    print(f"[*] with Basic challenge on /: {len(basic_hosts)}")
+    print(f"[*] MATCH (200 with credentials): {len(matches)} -> {args.output}")
     for r in matches:
         print(f"  [MATCH] {r.base_url}/  creds={r.creds}  PoC: {r.curl_poc}")
 
