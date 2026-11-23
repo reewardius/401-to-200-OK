@@ -2,7 +2,7 @@
 
 Run:
 ```
-> httpx -l alive.txt -mc 401 -o 401.txt
+> httpx -l alive.txt -mc 400,401,403 -o 40X.txt
 
-> python3 check_401_to_200.py -f 401.txt
+> python3 check_401_to_200.py -f 40X.txt
 ```
