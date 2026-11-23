@@ -4,15 +4,15 @@
 
 Для каждого хоста из файла:
   1. GET /  без авторизации
-       - ответ не 401 или нет WWW-Authenticate: Basic  -> хост пропускается
+       - нет WWW-Authenticate: Basic (любой код статуса) -> хост пропускается
   2. GET /  с заголовком Authorization: Basic <base64(user:pass)>
-       для каждой пары из --creds (по умолчанию топ-10, см. DEFAULT_CREDS)
+       для каждой пары из --creds (по умолчанию все пары из DEFAULT_CREDS)
        - 200 OK -> MATCH, остальные пары не проверяются
 
 Использование:
     python3 basic_auth_check.py -f alive_cloud_assets.txt -o basic_auth_matches.txt
     python3 basic_auth_check.py -f hosts.txt --creds admin:admin --creds admin:password \
-        --json basic_auth_results.json --user-agent "EASM by appsec@fozzy.ua"
+        --json basic_auth_results.json --user-agent "EASM by appsec@fozzy.ua" --delay 0.5
 
 Строки без схемы считаются https://. Пути в строках игнорируются: проверяется только корень.
 """
@@ -21,7 +21,9 @@ import base64
 import concurrent.futures
 import json
 import re
+import shlex
 import sys
+import time
 from dataclasses import asdict, dataclass
 from typing import Optional
 from urllib.parse import urlparse
@@ -144,7 +146,7 @@ BASIC_CHALLENGE_RE = re.compile(r"(^|,)\s*basic(\s|$)", re.IGNORECASE)
 class Result:
     base_url: str
     unauth_status: Optional[int] = None
-    challenge: Optional[str] = None        # WWW-Authenticate с 401
+    challenge: Optional[str] = None        # WWW-Authenticate с Basic-челленджем
     matched: bool = False
     creds: Optional[str] = None            # пара, которая дала 200
     status: Optional[int] = None
@@ -179,7 +181,7 @@ def read_bases(path: str) -> list[str]:
 
 
 def check_host(base: str, creds: list[str], timeout: int, verify: bool,
-               headers: dict) -> Result:
+               headers: dict, delay: float) -> Result:
     res = Result(base_url=base)
     root = base + "/"
 
@@ -193,7 +195,7 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
 
     res.unauth_status = r.status_code
     challenge = r.headers.get("WWW-Authenticate", "")
-    if r.status_code != 401 or not BASIC_CHALLENGE_RE.search(challenge):
+    if not BASIC_CHALLENGE_RE.search(challenge):
         return res
     res.challenge = challenge
 
@@ -202,6 +204,8 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
         token = base64.b64encode(pair.encode("utf-8")).decode("ascii")
         h = dict(headers)
         h["Authorization"] = f"Basic {token}"
+        if delay > 0:
+            time.sleep(delay)
         try:
             r2 = requests.get(root, headers=h, timeout=timeout, verify=verify,
                               allow_redirects=False)
@@ -213,7 +217,7 @@ def check_host(base: str, creds: list[str], timeout: int, verify: bool,
             res.status = 200
             res.body_size = len(r2.content)
             res.content_type = r2.headers.get("Content-Type", "").split(";")[0].strip().lower()
-            res.curl_poc = f"curl -i -u '{pair}' '{root}'"
+            res.curl_poc = f"curl -i -u {shlex.quote(pair)} {shlex.quote(root)}"
             break
     return res
 
@@ -225,9 +229,11 @@ def main():
                     help="Файл с матчами (URL, пара, статус)")
     ap.add_argument("--json", metavar="FILE", help="Полный результат по всем хостам с Basic-challenge (JSON)")
     ap.add_argument("--creds", action="append", metavar="USER:PASS",
-                    help="Пара для проверки (можно несколько раз). По умолчанию топ-10 пар (см. DEFAULT_CREDS)")
+                    help="Пара для проверки (можно несколько раз). По умолчанию все пары из DEFAULT_CREDS")
     ap.add_argument("-w", "--workers", type=int, default=20, help="Параллельных хостов (default 20)")
     ap.add_argument("-t", "--timeout", type=int, default=10, help="Таймаут запроса, сек (default 10)")
+    ap.add_argument("--delay", type=float, default=0.0,
+                    help="Пауза перед каждой попыткой с кредами, сек (default 0)")
     ap.add_argument("--user-agent", default=None, help="User-Agent для запросов")
     ap.add_argument("--no-verify-ssl", action="store_true", help="Не проверять TLS-сертификаты")
     args = ap.parse_args()
@@ -248,7 +254,10 @@ def main():
 
     print(f"[*] хостов: {len(bases)}, пар: {len(creds)} ({', '.join(creds)})")
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        results = list(ex.map(lambda b: check_host(b, creds, args.timeout, verify, headers), bases))
+        results = list(ex.map(
+            lambda b: check_host(b, creds, args.timeout, verify, headers, args.delay),
+            bases,
+        ))
 
     basic_hosts = [r for r in results if r.challenge]
     matches = [r for r in results if r.matched]
